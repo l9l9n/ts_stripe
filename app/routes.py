@@ -97,22 +97,34 @@ async def create_checkout_session(
     body: CheckoutRequest,
     db: AsyncSession = Depends(get_session),
 ):
-    """Создаёт Stripe Checkout сессию для конкретного продукта."""
-    product = await Product.get_by_id(db, body.product_id)
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    if not product.stripe_price_id:
-        raise HTTPException(status_code=400, detail="Product not synced with Stripe")
+    """Создаёт Stripe Checkout сессию для одного или нескольких продуктов."""
+    line_items = []
+    product_ids = []
+
+    for item in body.items:
+        product = await Product.get_by_id(db, item.product_id)
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Product {item.product_id} not found",
+            )
+        if not product.stripe_price_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Product {item.product_id} not synced with Stripe",
+            )
+        line_items.append({
+            "price": product.stripe_price_id,
+            "quantity": item.quantity,
+        })
+        product_ids.append(str(item.product_id))
 
     try:
         session = stripe.checkout.Session.create(
-            line_items=[{
-                "price": product.stripe_price_id,
-                "quantity": 1,
-            }],
+            line_items=line_items,
             metadata={
                 "user_id": "42",
-                "product_id": str(product.id),
+                "product_ids": ",".join(product_ids),
             },
             mode="payment",
             success_url=settings.base_url + "/success?session_id={CHECKOUT_SESSION_ID}",

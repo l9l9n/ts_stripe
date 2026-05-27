@@ -51,9 +51,14 @@ class ProductUpdate(BaseModel):
 
 # --- Checkout ---
 
+class CartItem(BaseModel):
+    product_id: int = Field(..., description="ID продукта из нашей БД")
+    quantity: int = Field(default=1, ge=1, le=99, description="Количество")
+
+
 class CheckoutRequest(BaseModel):
     email: EmailStr
-    product_id: int = Field(..., description="ID продукта из нашей БД")
+    items: list[CartItem] = Field(..., min_length=1, description="Список продуктов")
 
 
 class CheckoutResponse(BaseModel):
