@@ -35,6 +35,13 @@ class Product(MappedAsDataclass, Base):
         return list(result.scalars().all())
 
     @staticmethod
+    async def get_by_stripe_product_id(session: AsyncSession, stripe_product_id: str) -> Optional["Product"]:
+        result = await session.execute(
+            select(Product).where(Product.stripe_product_id == stripe_product_id)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def create_with_stripe(
         session: AsyncSession,
         name: str,
@@ -43,18 +50,15 @@ class Product(MappedAsDataclass, Base):
         description: Optional[str] = None,
     ) -> "Product":
         """Создаёт продукт в Stripe и сохраняет в БД."""
-        # 1. Создаём продукт в Stripe
         stripe_product = stripe_lib.Product.create(
             name=name,
             description=description or "",
         )
-        # 2. Создаём цену в Stripe
         stripe_price = stripe_lib.Price.create(
             product=stripe_product.id,
-            unit_amount=price,  # уже в центах
+            unit_amount=price,
             currency=currency,
         )
-        # 3. Сохраняем в БД
         product = Product(
             name=name,
             price=price,
@@ -68,17 +72,67 @@ class Product(MappedAsDataclass, Base):
         await session.refresh(product)
         return product
 
+    @staticmethod
+    async def sync_from_stripe(session: AsyncSession) -> dict:
+        """
+        Тянет все активные продукты из Stripe и синхронизирует с БД.
+        - Новые продукты → создаёт в БД
+        - Существующие → обновляет name, description, price
+        Возвращает статистику: created / updated / skipped
+        """
+        created, updated, skipped = 0, 0, 0
+
+        stripe_products = stripe_lib.Product.list(active=True, limit=100)
+
+        for stripe_product in stripe_products.auto_paging_iter():
+            # Берём первую активную цену продукта
+            prices = stripe_lib.Price.list(
+                product=stripe_product.id,
+                active=True,
+                limit=1,
+            )
+            if not prices.data:
+                skipped += 1
+                continue
+
+            stripe_price = prices.data[0]
+            unit_amount = stripe_price.unit_amount or 0
+            currency = stripe_price.currency
+
+            existing = await Product.get_by_stripe_product_id(session, stripe_product.id)
+
+            if existing:
+                existing.name = stripe_product.name
+                existing.description = stripe_product.description or None
+                existing.price = unit_amount
+                existing.currency = currency
+                existing.stripe_price_id = stripe_price.id
+                updated += 1
+            else:
+                product = Product(
+                    name=stripe_product.name,
+                    price=unit_amount,
+                    currency=currency,
+                    description=stripe_product.description or None,
+                    stripe_product_id=stripe_product.id,
+                    stripe_price_id=stripe_price.id,
+                )
+                session.add(product)
+                created += 1
+
+        await session.commit()
+        return {"created": created, "updated": updated, "skipped": skipped}
+
     async def sync_to_stripe(self, session: AsyncSession) -> "Product":
+        """Синхронизирует изменения продукта в Stripe."""
         if not self.stripe_product_id or not self.stripe_price_id:
             raise ValueError("Продукт не привязан к Stripe")
 
-        # Обновляем название/описание продукта
         stripe_lib.Product.modify(
             self.stripe_product_id,
             name=self.name,
             description=self.description or "",
         )
-        # Цену в Stripe нельзя изменить — создаём новую и архивируем старую
         stripe_lib.Price.modify(self.stripe_price_id, active=False)
         new_price = stripe_lib.Price.create(
             product=self.stripe_product_id,
@@ -116,6 +170,7 @@ class Payment(MappedAsDataclass, Base):
 
     @staticmethod
     async def create_from_stripe(session: AsyncSession, stripe_session) -> Optional["Payment"]:
+        """Идемпотентное создание — если уже есть, просто возвращает существующий."""
         existing = await Payment.get_by_session_id(session, stripe_session["id"])
         if existing:
             return existing

@@ -26,19 +26,20 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_ses
         product = await Product.create_with_stripe(
             session=db,
             name=body.name,
-            price=body.price,
+            price=body.price_in_cents,
             currency=body.currency,
             description=body.description,
         )
     except stripe.StripeError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return product
+    return ProductResponse.from_product(product)
 
 
 @router.get("/products/", response_model=list[ProductResponse])
 async def list_products(db: AsyncSession = Depends(get_session)):
     """Список всех продуктов из БД."""
-    return await Product.get_all(db)
+    products = await Product.get_all(db)
+    return [ProductResponse.from_product(p) for p in products]
 
 
 @router.get("/products/{product_id}", response_model=ProductResponse)
@@ -46,7 +47,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_session)):
     product = await Product.get_by_id(db, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    return product
+    return ProductResponse.from_product(product)
 
 
 @router.patch("/products/{product_id}", response_model=ProductResponse)
@@ -63,7 +64,7 @@ async def update_product(
     if body.name is not None:
         product.name = body.name
     if body.price is not None:
-        product.price = body.price
+        product.price = body.price_in_cents
     if body.description is not None:
         product.description = body.description
 
@@ -71,7 +72,22 @@ async def update_product(
         await product.sync_to_stripe(db)
     except stripe.StripeError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return product
+    return ProductResponse.from_product(product)
+
+
+# --- Sync from Stripe ---
+
+@router.post("/products/sync-from-stripe/")
+async def sync_products_from_stripe(db: AsyncSession = Depends(get_session)):
+    """
+    Тянет все активные продукты из Stripe и синхронизирует с БД.
+    Новые → создаёт, существующие → обновляет, без цены → пропускает.
+    """
+    try:
+        result = await Product.sync_from_stripe(db)
+    except stripe.StripeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result
 
 
 # --- Checkout ---

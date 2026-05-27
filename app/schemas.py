@@ -6,9 +6,13 @@ from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 class ProductCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    price: int = Field(..., gt=0, description="Цена в центах (например 2000 = $20.00)")
+    price: float = Field(..., gt=0, description="Цена в долларах (например 20.00 = $20.00)")
     currency: str = Field(default="usd", max_length=10)
     description: Optional[str] = Field(default=None, max_length=1000)
+
+    @property
+    def price_in_cents(self) -> int:
+        return round(self.price * 100)
 
 
 class ProductResponse(BaseModel):
@@ -16,17 +20,33 @@ class ProductResponse(BaseModel):
 
     id: int
     name: str
-    price: int
+    price_usd: float
     currency: str
     description: Optional[str]
     stripe_product_id: Optional[str]
     stripe_price_id: Optional[str]
 
+    @classmethod
+    def from_product(cls, product) -> "ProductResponse":
+        return cls(
+            id=product.id,
+            name=product.name,
+            price_usd=product.price / 100,
+            currency=product.currency,
+            description=product.description,
+            stripe_product_id=product.stripe_product_id,
+            stripe_price_id=product.stripe_price_id,
+        )
+
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
-    price: Optional[int] = Field(default=None, gt=0)
+    price: Optional[float] = Field(default=None, gt=0, description="Цена в долларах")
     description: Optional[str] = Field(default=None, max_length=1000)
+
+    @property
+    def price_in_cents(self) -> Optional[int]:
+        return round(self.price * 100) if self.price is not None else None
 
 
 # --- Checkout ---
